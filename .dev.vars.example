@@ -1,0 +1,17 @@
+# Copy this file to ".dev.vars" (no extension change) for local `wrangler dev`.
+# For production, set each with: wrangler secret put <NAME>
+
+# Location PIT token or OAuth access token (Bearer). Same token your MCP uses.
+GHL_API_TOKEN=
+
+# Custom field IDs on the contact (create them in GHL, paste IDs here).
+GHL_INBOUND_FIELD_ID=
+GHL_OUTBOUND_FIELD_ID=
+
+# Optional: paste GHL's marketplace webhook public key (PEM) to verify
+# signatures. Leave blank to skip verification during initial testing.
+GHL_WEBHOOK_PUBLIC_KEY=
+
+# Optional: a random string the workflow must send on /decide as
+# x-relay-secret. Leave blank to disable the check.
+DECIDE_SHARED_SECRET=

@@ -1,0 +1,7 @@
+name = "ghl-outbound-stamp"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+# No build step — plain ESM module Worker.
+# Secrets are set with `wrangler secret put <NAME>` (see README).
+# For local dev, copy .dev.vars.example -> .dev.vars and fill values.

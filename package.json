@@ -1,0 +1,15 @@
+{
+  "name": "ghl-outbound-stamp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker that stamps GHL inbound/outbound message timestamps onto contacts and decides AI vs human takeover.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
