@@ -8,22 +8,32 @@
  * workflow can later decide whether a human responded.
  *
  * Routes:
- *   POST /stamp   — GHL Marketplace webhook receiver. Writes
- *                   last_inbound_at / last_outbound_at to the contact.
- *   POST /decide  — Called by the GHL workflow's Custom Webhook action
- *                   after the 15-min wait. Compares the two timestamps and
- *                   returns { route: "AI_TAKEOVER" | "HUMAN_HANDLED" }.
- *   GET  /health  — Liveness check.
+ *   POST /stamp             — GHL Marketplace webhook receiver. Writes
+ *                             last_inbound_at / last_outbound_at /
+ *                             last_ai_outbound_at to the contact.
+ *   POST /decide            — Called by a GHL workflow Custom Webhook after
+ *                             the 15-min wait. Compares timestamps and
+ *                             returns { route: "AI_TAKEOVER"|"HUMAN_HANDLED" }.
+ *   POST /backfill-contact  — Retroactively stamps a contact from SMS
+ *                             history. Requires x-relay-secret. Call from
+ *                             a GHL Smart List workflow or a local script.
+ *                             Populates inbound + LO outbound only (AI
+ *                             outbound cannot be distinguished from history).
+ *   GET  /health            — Liveness check.
  *
- * Secrets (wrangler secret put / .dev.vars):
- *   GHL_API_TOKEN            Location PIT or OAuth access token (Bearer).
- *   GHL_INBOUND_FIELD_ID     Custom field id for last_inbound_at.
- *   GHL_OUTBOUND_FIELD_ID    Custom field id for last_outbound_at.
- *   GHL_WEBHOOK_PUBLIC_KEY   (optional) GHL's PEM public key to verify
- *                            webhook signatures. If unset, verification is
- *                            skipped (fine for first testing, enable later).
- *   DECIDE_SHARED_SECRET     (optional) Shared secret required on /decide
- *                            via the x-relay-secret header.
+ * Secrets (Cloudflare dashboard → Settings → Variables and secrets → Runtime):
+ *   GHL_API_TOKEN              Location PIT or OAuth access token (Bearer).
+ *   GHL_INBOUND_FIELD_ID       Field id: AZM SLA — Last inbound SMS (stamp).
+ *   GHL_OUTBOUND_FIELD_ID      Field id: AZM SLA — Last LO outbound SMS (stamp).
+ *   GHL_AI_OUTBOUND_FIELD_ID   Field id: AZM SLA — Last AI outbound (stamp).
+ *                              Stamped in /stamp when webhook payload has no
+ *                              userId (system/AI-sent message). Not populated
+ *                              by /backfill-contact (indistinguishable from
+ *                              history).
+ *   GHL_WEBHOOK_PUBLIC_KEY     (optional) GHL PEM public key for webhook
+ *                              signature verification.
+ *   DECIDE_SHARED_SECRET       (optional) Required on /decide and
+ *                              /backfill-contact via x-relay-secret header.
  */
 
 const GHL_API_BASE = 'https://services.leadconnectorhq.com';
@@ -42,6 +52,9 @@ export default {
       }
       if (request.method === 'POST' && url.pathname === '/decide') {
         return await handleDecide(request, env);
+      }
+      if (request.method === 'POST' && url.pathname === '/backfill-contact') {
+        return await handleBackfill(request, env);
       }
       return json({ error: 'not_found', path: url.pathname }, 404);
     } catch (err) {
@@ -84,9 +97,14 @@ async function handleStamp(request, env) {
   // Prefer the event's own timestamp; fall back to now.
   const stamp = normalizeStamp(body.dateAdded || body.dateUpdated) || new Date().toISOString();
 
+  // Distinguish AI-sent outbound (no userId in payload) from LO-sent outbound.
   let fieldId = null;
-  if (type.includes('outbound')) fieldId = env.GHL_OUTBOUND_FIELD_ID;
-  else if (type.includes('inbound')) fieldId = env.GHL_INBOUND_FIELD_ID;
+  if (type.includes('outbound')) {
+    const isAi = !body.userId && env.GHL_AI_OUTBOUND_FIELD_ID;
+    fieldId = isAi ? env.GHL_AI_OUTBOUND_FIELD_ID : env.GHL_OUTBOUND_FIELD_ID;
+  } else if (type.includes('inbound')) {
+    fieldId = env.GHL_INBOUND_FIELD_ID;
+  }
 
   if (!fieldId) {
     return json({ skipped: true, reason: 'unhandled_type', type: body.type }, 200);
@@ -138,6 +156,89 @@ async function handleDecide(request, env) {
     contactId,
     last_inbound_at: inbound ? inbound.toISOString() : null,
     last_outbound_at: outbound ? outbound.toISOString() : null,
+  });
+}
+
+// ─── /backfill-contact ───────────────────────────────────────────────────
+
+async function handleBackfill(request, env) {
+  if (env.DECIDE_SHARED_SECRET) {
+    const provided = request.headers.get('x-relay-secret') || '';
+    if (provided !== env.DECIDE_SHARED_SECRET) {
+      return json({ error: 'unauthorized' }, 401);
+    }
+  }
+
+  let body = {};
+  try { body = await request.json(); } catch {}
+
+  const contactId = body.contactId || body.contact_id;
+  if (!contactId) return json({ error: 'no_contact_id' }, 400);
+
+  // Need locationId to search conversations — pull it from the contact record.
+  const contact = await getContact(env, contactId);
+  const locationId = contact.locationId;
+  if (!locationId) return json({ error: 'no_location_id', contactId }, 200);
+
+  // Find the contact's conversation.
+  const convRes = await fetch(
+    `${GHL_API_BASE}/conversations/search?contactId=${encodeURIComponent(contactId)}&locationId=${encodeURIComponent(locationId)}&limit=1`,
+    { method: 'GET', headers: ghlHeaders(env) }
+  );
+  if (!convRes.ok) {
+    const t = await convRes.text();
+    throw new Error(`searchConversations ${convRes.status}: ${t}`);
+  }
+  const convData = await convRes.json();
+  const conversations = convData.conversations || convData.data || [];
+  if (!conversations.length) {
+    return json({ ok: true, contactId, skipped: 'no_conversation' });
+  }
+  const convId = conversations[0].id;
+
+  // Fetch up to 100 most recent messages (GHL returns newest first).
+  const msgRes = await fetch(
+    `${GHL_API_BASE}/conversations/${encodeURIComponent(convId)}/messages?limit=100`,
+    { method: 'GET', headers: ghlHeaders(env) }
+  );
+  if (!msgRes.ok) {
+    const t = await msgRes.text();
+    throw new Error(`getMessages ${msgRes.status}: ${t}`);
+  }
+  const msgData = await msgRes.json();
+  // GHL wraps messages under messages.messages
+  const messages = (msgData.messages && msgData.messages.messages) || msgData.messages || [];
+
+  // Find last inbound and last outbound SMS (type 1).
+  // AI outbound cannot be reliably distinguished from LO outbound in history,
+  // so GHL_AI_OUTBOUND_FIELD_ID is intentionally not backfilled here.
+  let lastInbound = null;
+  let lastOutbound = null;
+  for (const msg of messages) {
+    if (msg.type !== 1) continue; // SMS only
+    const ts = new Date(msg.dateAdded);
+    if (isNaN(ts.getTime())) continue;
+    if (msg.direction === 'inbound' && (!lastInbound || ts > lastInbound)) lastInbound = ts;
+    if (msg.direction === 'outbound' && (!lastOutbound || ts > lastOutbound)) lastOutbound = ts;
+  }
+
+  const updates = [];
+  if (lastInbound && env.GHL_INBOUND_FIELD_ID) {
+    await updateContactField(env, contactId, env.GHL_INBOUND_FIELD_ID, lastInbound.toISOString());
+    updates.push('inbound');
+  }
+  if (lastOutbound && env.GHL_OUTBOUND_FIELD_ID) {
+    await updateContactField(env, contactId, env.GHL_OUTBOUND_FIELD_ID, lastOutbound.toISOString());
+    updates.push('lo_outbound');
+  }
+
+  return json({
+    ok: true,
+    contactId,
+    convId,
+    updates,
+    last_inbound_at: lastInbound ? lastInbound.toISOString() : null,
+    last_outbound_at: lastOutbound ? lastOutbound.toISOString() : null,
   });
 }
 
