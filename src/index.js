@@ -215,7 +215,7 @@ async function handleBackfill(request, env) {
   let lastInbound = null;
   let lastOutbound = null;
   for (const msg of messages) {
-    if (msg.type !== 1) continue; // SMS only
+    if (msg.type !== 2) continue; // SMS only (GHL type 2 = TYPE_SMS; type 1 = call)
     const ts = new Date(msg.dateAdded);
     if (isNaN(ts.getTime())) continue;
     if (msg.direction === 'inbound' && (!lastInbound || ts > lastInbound)) lastInbound = ts;
