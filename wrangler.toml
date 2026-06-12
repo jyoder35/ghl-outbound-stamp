@@ -2,6 +2,11 @@ name = "ghl-outbound-stamp"
 main = "src/index.js"
 compatibility_date = "2026-06-01"
 
-# No build step — plain ESM module Worker.
-# Secrets are set with `wrangler secret put <NAME>` (see README).
-# For local dev, copy .dev.vars.example -> .dev.vars and fill values.
+# Non-sensitive GHL custom field IDs — safe to commit.
+# Secrets (GHL_API_TOKEN, DECIDE_SHARED_SECRET) are set in the Cloudflare
+# dashboard as encrypted Secrets and are never overwritten by wrangler deploy.
+# Plain Variables ARE reset on every deploy, so they must live here.
+[vars]
+GHL_INBOUND_FIELD_ID     = "IHqStZ6uVtH0xUftyWIq"
+GHL_OUTBOUND_FIELD_ID    = "zR0SupfllOGbCWFEjo14"
+GHL_AI_OUTBOUND_FIELD_ID = "XT6LHwo0KMFlwJy0qiH5"
